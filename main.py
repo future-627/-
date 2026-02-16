@@ -44,7 +44,7 @@ async def start_web_server():
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.getenv('PORT', 8080)))
+    site = web.TCPSite(runner, '0.0.0.0', int(os.getenv('PORT', 8000)))
     await site.start()
 
 # ==========================================
@@ -272,4 +272,5 @@ async def on_message(message):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
 
