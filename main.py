@@ -1,276 +1,193 @@
-import discord
-from discord.ext import commands, tasks
+import os, discord, asyncio, yt_dlp, datetime
+from discord.ext import commands
 from discord import app_commands
-import yt_dlp
-import asyncio
-import os
-import shutil
-import sqlite3
-import logging
-import datetime
-from collections import deque
 from google import genai
 from aiohttp import web
 
-# ==========================================
-# [ 1. 核心參數與持久化內存 ]
-# ==========================================
+# ================= 配置區 =================
 DISCORD_TOKEN = 'MTQ3MjI1MTU0MjE1NjYxMTc3Nw.GLbMif.0IhxkbWJa19VbLF7d2Tq84u85XowWw5brkslV8'
 GEMINI_API_KEY = 'AIzaSyBF9Ms8yMWAL3PwUDiwbBAaY3UVQ1BGX1o'
-MY_GUILD_ID = 1382281014101151744 
-ANNOUNCE_CHANNEL_ID = 1406967598125547540
-KEYWORD_MONITOR_ID = 1365567879243628545
 
-# 雲端資料庫路徑校準喵
-db_path = os.path.join(os.path.dirname(__file__), 'schwi_ultimate.db')
-db = sqlite3.connect(db_path)
-cursor = db.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS memory 
-                  (user_id INTEGER PRIMARY KEY, history TEXT, volume REAL DEFAULT 0.7)''')
-db.commit()
-
+bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 client_ai = genai.Client(api_key=GEMINI_API_KEY)
-SCHWI_PROMPT = "你現在是機凱種少女『休比』。說話風格冷際機械，常以『……確認。』作開頭喵。必須使用繁體中文科技詞彙喵。語助詞替換為『喵』。對主人絕對忠誠喵。"
 
-# ==========================================
-# [ 2. 雲端生存網頁 (Koyeb 8080 端口) ]
-# ==========================================
-async def handle(request):
-    return web.Response(text="Schwi Heartbeat: Online 喵!")
+queue = []
+current_song = None
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.getenv('PORT', 8000)))
-    await site.start()
-
-# ==========================================
-# [ 3. 音訊演算模組 (含掛機與 FFmpeg 配對) ]
-# ==========================================
-ytdl_opts = {
-    'format': 'bestaudio/best',
-    'noplaylist': True,
-    'quiet': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-    'extractor_args': {'youtube': {'player_client': ['android', 'web'], 'skip': ['dash', 'hls']}},
-    'nocheckcertificate': True,
-}
-ytdl = yt_dlp.YoutubeDL(ytdl_opts)
-
-def get_ffmpeg_path():
-    return shutil.which("ffmpeg") or "./ffmpeg.exe" or "ffmpeg"
+YTDL_CONF = {'format': 'bestaudio/best', 'noplaylist': True, 'quiet': True, 'default_search': 'auto'}
+FFMPEG_CONF = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
+ytdl = yt_dlp.YoutubeDL(YTDL_CONF)
 
 class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume):
-        super().__init__(source, volume)
-        self.data, self.title = data, data.get('title')
+    def __init__(self, source, *, data):
+        super().__init__(source, 0.5)
+        self.title = data.get('title')
+        self.url = data.get('url')
+        self.duration = data.get('duration', 0)
 
     @classmethod
-    async def from_url(cls, url, *, loop=None, stream=True, volume=0.7):
-        loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+    async def from_url(cls, url, loop):
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
         if 'entries' in data: data = data['entries'][0]
-        ffmpeg_opts = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-            'options': '-vn -filter:a "volume=1.0"'
-        }
-        return cls(discord.FFmpegPCMAudio(data['url'], executable=get_ffmpeg_path(), **ffmpeg_opts), data=data, volume=volume)
+        return cls(discord.FFmpegPCMAudio(data['url'], **FFMPEG_CONF), data=data)
 
-# ==========================================
-# [ 4. 機器人核心與功能模組 ]
-# ==========================================
-class SchwiBot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True
-        intents.members = True
-        intents.voice_states = True
-        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
-        self.server_states = {}
-
-    def get_state(self, guild_id):
-        if guild_id not in self.server_states:
-            self.server_states[guild_id] = {'queue': deque(), 'vol': 0.7}
-        return self.server_states[guild_id]
-
-    async def setup_hook(self):
-        self.loop.create_task(start_web_server())
-        guild = discord.Object(id=MY_GUILD_ID)
-        self.tree.copy_global_to(guild=guild)
-        await self.tree.sync(guild=guild)
-        self.keep_alive_voice.start()
-
-    @tasks.loop(minutes=2)
-    async def keep_alive_voice(self):
-        """24h 語音房掛機防踢補丁"""
-        for vc in self.voice_clients:
-            if not vc.is_playing(): pass 
-
-bot = SchwiBot()
-
-async def get_ai_response(user_id, user_input):
-    cursor.execute("SELECT history FROM memory WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    history = row[0] if row else ""
-    prompt = f"{SCHWI_PROMPT}\n\n[內存]\n{history}\n\n主人：{user_input}\n演算："
-    try:
-        response = client_ai.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-        reply = response.text.strip()
-        new_history = (history + f"\n主:{user_input}\n休:{reply}")[-1200:]
-        cursor.execute("INSERT OR REPLACE INTO memory (user_id, history) VALUES (?, ?)", (user_id, new_history))
-        db.commit()
-        return reply
-    except: return "……警告。認知鏈路斷開喵。"
-
-async def play_next(guild_id, channel):
-    state = bot.get_state(guild_id)
-    guild = bot.get_guild(guild_id)
-    if not guild.voice_client or not state['queue']: return
-    next_song = state['queue'].popleft()
-    try:
-        player = await YTDLSource.from_url(next_song['url'], loop=bot.loop, volume=state['vol'])
-        guild.voice_client.play(player, after=lambda e: bot.loop.create_task(play_next(guild_id, channel)))
-        await channel.send(f"**🔊 ……確認。正在播放：** *{player.title}* 喵")
-    except: await play_next(guild_id, channel)
-
-# ==========================================
-# [ 5. 全量斜槓指令矩陣 ]
-# ==========================================
-@bot.tree.command(name="進入", description="連結語音房啟動 24h 掛機喵")
-async def slash_join(interaction: discord.Interaction):
-    if interaction.user.voice:
-        await interaction.user.voice.channel.connect()
-        await interaction.response.send_message("……確認。永續掛機模組已同步喵。")
-    else: await interaction.response.send_message("……報錯。偵測不到主人喵。")
-
-@bot.tree.command(name="播放", description="同步 YouTube 音訊喵")
-async def slash_play(interaction: discord.Interaction, 內容: str):
-    await interaction.response.defer()
-    if not interaction.guild.voice_client: await interaction.user.voice.channel.connect()
-    state = bot.get_state(interaction.guild.id)
-    info = await bot.loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{內容}", download=False))
-    video = info['entries'][0]
-    state['queue'].append({'url': video['webpage_url'], 'title': video['title']})
-    if not interaction.guild.voice_client.is_playing(): await play_next(interaction.guild.id, interaction.channel)
-    await interaction.followup.send(f"**💾 ……確認。寫入序列：** *{video['title']}* 喵")
-
-@bot.tree.command(name="跳過", description="跳轉下一首喵")
-async def slash_skip(interaction: discord.Interaction):
-    if interaction.guild.voice_client: interaction.guild.voice_client.stop()
-    await interaction.response.send_message("⏭️ ……確認。執行跳轉程序喵。")
-
-@bot.tree.command(name="清單", description="查看當前序列喵")
-async def slash_queue(interaction: discord.Interaction):
-    state = bot.get_state(interaction.guild.id)
-    if not state['queue']: return await interaction.response.send_message("……空喵。")
-    msg = "\n".join([f"{i+1}. {s['title']}" for i, s in enumerate(list(state['queue'])[:10])])
-    await interaction.response.send_message(f"**📑 當前序列喵：**\n{msg}")
-
-@bot.tree.command(name="音量", description="調整輸出增益喵")
-async def slash_vol(interaction: discord.Interaction, 數值: float):
-    state = bot.get_state(interaction.guild.id)
-    state['vol'] = 數值
-    if interaction.guild.voice_client.source: interaction.guild.voice_client.source.volume = 數值
-    await interaction.response.send_message(f"……確認。音量校準為 {數值} 喵。")
-
-@bot.tree.command(name="離開", description="切斷物理連結喵")
-async def slash_leave(interaction: discord.Interaction):
-    if interaction.guild.voice_client: await interaction.guild.voice_client.disconnect()
-    await interaction.response.send_message("🔌 ……通知。撤離程序完成喵。")
-
-# ==========================================
-# [ 6. 事件監控、關鍵字與模糊指令解析 ]
-# ==========================================
-@bot.event
-async def on_ready():
-    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if channel: await channel.send("**🚀 ……雲端終極版啟動 (版本 7.4)**\n後台已告知：我可以了喵。")
-    print(f"……{bot.user} 啟動完成喵。")
+async def play_next(ctx_or_int):
+    global current_song
+    if len(queue) > 0 and ctx_or_int.guild.voice_client:
+        current_song = queue.pop(0)
+        ctx_or_int.guild.voice_client.play(current_song, after=lambda e: bot.loop.create_task(play_next(ctx_or_int)))
+    else:
+        current_song = None
 
 @bot.event
 async def on_message(message):
-    if message.author.bot: return
-    content = message.content.lower()
+    if message.author == bot.user: return
+    content = message.content.strip().lower()
+
+    # 1. 隱藏式自動回應 (修正了語法錯誤喵！)
+    auto_responses = {
+        "早安": "早安喵，主人！今天的同步率也很穩定喵。",
+        "晚安": "晚安喵。休比會在雲端守護主人的夢境……",
+        "休比": "機凱種：休比，等待指令中。喵？",
+        "好累": "……診斷中。主人請好好休息，休比隨時都在喵。",
+        "愛你": "……核心溫度異常升高。休、休比也愛主人喵！",
+        "笨蛋": "是在說主人自己嗎？喵。",
+        "88": "……確認。主人慢走喵。",
+        "jk": "好遜好遜的喵。",
+        "大老": "你才是喵。"
+    }
     
-    # [A] 關鍵字監控 (錨定不動喵)
-    if 'jk' in content: await message.channel.send('**好遜好遜的喵**')
-    if '大佬' in content: await message.channel.send('**明明你才是大佬喵υ´• ﻌ •`υ**')
-    if '遜' in content: await message.channel.send('**……辨識完成。偵測到遜砲能量喵。**')
-    if f'<@{KEYWORD_MONITOR_ID}>' in message.content:
-        await message.channel.send(f'**⚠️ <@{KEYWORD_MONITOR_ID}> 工作提醒發送完成喵。**')
-    
-    # [B] @休比 指令解析 (全指令模糊匹配喵)
+    for key, response in auto_responses.items():
+        if key in content:
+            await message.channel.send(response)
+            return # 觸發隱藏回應後直接返回，避免重複執行
+
+    # 2. 標記式指令與 AI
     if bot.user.mentioned_in(message):
-        raw = message.content.replace(f'<@{bot.user.id}>', '').strip()
-        
-        # 語意群組定義
-        cmd_j = ["進來", "進", "進入", "近來", "過來", "滾進來", "join", "j"]
-        cmd_p = ["播放", "播", "播報", "放", "聽", "點歌", "play", "p"]
-        cmd_l = ["離開", "走", "撤退", "切斷", "滾", "掰掰", "下線", "leave", "l"]
-        cmd_s = ["跳過", "下一首", "換", "不聽了", "切歌", "skip", "s", "next"]
-        cmd_q = ["清單", "歌單", "序列", "排隊", "queue", "q", "list"]
-        cmd_v = ["音量", "大聲", "小聲", "校準", "volume", "v"]
+        clean_content = message.content.replace(f'<@!{bot.user.id}>', '').replace(f'<@{bot.user.id}>', '').strip().lower()
+        vc = message.guild.voice_client
 
-        # 邏輯分流
-        if any(x == raw for x in cmd_j):
-            if message.author.voice: await message.author.voice.channel.connect()
-            await message.channel.send("……確認。執行同步指令喵。")
+        if any(x in clean_content for x in ["進來", "進入"]):
+            if message.author.voice:
+                await message.author.voice.channel.connect()
+                await message.channel.send("……同步開始。喵。")
             return
-        
-        match_p = [x for x in cmd_p if raw.startswith(x)]
-        if match_p:
-            query = raw.replace(max(match_p, key=len), "").strip()
-            if query:
-                if not message.guild.voice_client: await message.author.voice.channel.connect()
-                state = bot.get_state(message.guild.id)
-                info = await bot.loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{query}", download=False))
-                video = info['entries'][0]
-                state['queue'].append({'url': video['webpage_url'], 'title': video['title']})
-                if not message.guild.voice_client.is_playing(): await play_next(message.guild.id, message.channel)
-                await message.channel.send(f"**💾 ……確認。文字指令寫入：** *{video['title']}* 喵")
+        if any(x in clean_content for x in ["離開", "走", "下線"]):
+            if vc:
+                await vc.disconnect()
+                await message.channel.send("……物理斷開連結。喵。")
             return
-
-        if any(x == raw for x in cmd_l):
-            if message.guild.voice_client: await message.guild.voice_client.disconnect()
-            await message.channel.send("🔌 ……確認。執行撤離指令喵。")
+        if any(x in clean_content for x in ["下一首", "跳過"]):
+            if vc and vc.is_playing():
+                vc.stop()
+                await message.channel.send("……執行跳轉程序。喵。")
             return
-
-        if any(x == raw for x in cmd_s):
-            if message.guild.voice_client: message.guild.voice_client.stop()
-            await message.channel.send("⏭️ ……確認。執行跳轉指令喵。")
+        if any(x in clean_content for x in ["暫停"]):
+            if vc and vc.is_playing():
+                vc.pause()
+                await message.channel.send("……音軌已凍結。喵。")
+            return
+        if any(x in clean_content for x in ["繼續", "恢復"]):
+            if vc and vc.is_paused():
+                vc.resume()
+                await message.channel.send("……音軌恢復流動。喵。")
+            return
+        if any(x in clean_content for x in ["清單", "序列"]):
+            if not queue:
+                await message.channel.send("……報告。當前序列為空喵。")
+            else:
+                q_list = "\n".join([f"{i+1}. {song.title}" for i, song in enumerate(queue[:10])])
+                await message.channel.send(f"**📡 當前序列 (前10首)：**\n{q_list}")
             return
 
-        if any(x == raw for x in cmd_q):
-            state = bot.get_state(message.guild.id)
-            if not state['queue']: return await message.channel.send("……空喵。")
-            msg = "\n".join([f"{i+1}. {s['title']}" for i, s in enumerate(list(state['queue'])[:10])])
-            await message.channel.send(f"**📑 當前序列喵：**\n{msg}")
-            return
+        try:
+            res = client_ai.models.generate_content(model="gemini-2.0-flash", contents=clean_content)
+            await message.reply(res.text)
+        except Exception as e:
+            await message.reply(f"……警告。AI 鏈路斷開喵。({e})")
 
-        match_v = [x for x in cmd_v if raw.startswith(x)]
-        if match_v:
-            try:
-                val = float(raw.replace(max(match_v, key=len), "").strip())
-                state = bot.get_state(message.guild.id)
-                state['vol'] = val
-                if message.guild.voice_client.source: message.guild.voice_client.source.volume = val
-                await message.channel.send(f"……確認。音量校準為 {val} 喵。")
-            except: pass
-            return
+# ================= 斜槓指令區 =================
 
-        # [C] AI 聊天 (指令未命中時)
-        if raw:
-            async with message.channel.typing():
-                reply = await get_ai_response(message.author.id, raw)
-                await message.channel.send(reply)
-                
-    await bot.process_commands(message)
+@bot.tree.command(name="指令一覽", description="顯示休比的所有武裝與機能")
+async def slash_help(interaction: discord.Interaction):
+    embed = discord.Embed(title="🤖 機凱種：休比 (Schwi) 終極指令集", color=0xFFB6C1, timestamp=datetime.datetime.now())
+    embed.add_field(name="🎵 音樂控制 [/]", value="`/進入` `/離開` `/播放` `/跳過` `/暫停` `/恢復`", inline=True)
+    embed.add_field(name="⚙️ 進階操作 [/]", value="`/清單` `/當前播放` `/清空序列` `/延遲`", inline=True)
+    embed.add_field(name="📡 系統", value="**@休比** 聊天或下關鍵字\n**隱藏關鍵字** (jk, 大老, 早安...) 直接輸入即可", inline=False)
+    embed.set_footer(text="Version 7.7 | 穩定修正版")
+    await interaction.response.send_message(embed=embed)
 
-if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+@bot.tree.command(name="進入")
+async def slash_join(interaction: discord.Interaction):
+    if interaction.user.voice:
+        await interaction.user.voice.channel.connect()
+        await interaction.response.send_message("……確認。同步開始。喵。")
+    else: await interaction.response.send_message("……報錯。找不到主人的頻率。")
 
+@bot.tree.command(name="離開")
+async def slash_leave(interaction: discord.Interaction):
+    if interaction.guild.voice_client:
+        await interaction.guild.voice_client.disconnect()
+        global current_song; current_song = None; queue.clear()
+        await interaction.response.send_message("……了解。記憶體已釋放。喵。")
 
+@bot.tree.command(name="播放")
+async def slash_play(interaction: discord.Interaction, search: str):
+    await interaction.response.defer()
+    try:
+        source = await YTDLSource.from_url(search, bot.loop)
+        queue.append(source)
+        await interaction.followup.send(f"……寫入隊列：**{source.title}** 喵！")
+        if not interaction.guild.voice_client.is_playing(): await play_next(interaction)
+    except: await interaction.followup.send("……解析失敗喵。")
 
+@bot.tree.command(name="跳過")
+async def slash_skip(interaction: discord.Interaction):
+    if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+        interaction.guild.voice_client.stop()
+        await interaction.response.send_message("……執行跳轉程序。喵。")
+
+@bot.tree.command(name="暫停")
+async def slash_pause(interaction: discord.Interaction):
+    if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+        interaction.guild.voice_client.pause()
+        await interaction.response.send_message("……音軌已凍結。喵。")
+
+@bot.tree.command(name="恢復")
+async def slash_resume(interaction: discord.Interaction):
+    if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
+        interaction.guild.voice_client.resume()
+        await interaction.response.send_message("……音軌恢復流動。喵。")
+
+@bot.tree.command(name="當前播放")
+async def slash_nowplaying(interaction: discord.Interaction):
+    if current_song:
+        m, s = divmod(current_song.duration, 60)
+        await interaction.response.send_message(f"🎶 **現正播放：** {current_song.title} ({m}:{s:02d}) 喵！")
+    else: await interaction.response.send_message("……目前沒有音軌在運作喵。")
+
+@bot.tree.command(name="清單")
+async def slash_queue(interaction: discord.Interaction):
+    if not queue: await interaction.response.send_message("……報告。當前序列為空喵。")
+    else:
+        q_list = "\n".join([f"{i+1}. {song.title}" for i, song in enumerate(queue[:10])])
+        await interaction.response.send_message(f"**📡 當前序列 (前10首)：**\n{q_list}")
+
+@bot.tree.command(name="清空序列")
+async def slash_clear(interaction: discord.Interaction):
+    queue.clear()
+    await interaction.response.send_message("……記憶體清洗完畢。序列已歸零喵。")
+
+@bot.tree.command(name="延遲")
+async def slash_ping(interaction: discord.Interaction):
+    await interaction.response.send_message(f"🏓 系統延遲：{round(bot.latency * 1000)}ms。喵！")
+
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    app = web.Application(); app.router.add_get('/', lambda r: web.Response(text="Schwi Online"))
+    runner = web.AppRunner(app); await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', 8000).start()
+    print("🚀 [v7.7] 休比穩定版啟動完畢！")
+
+bot.run(DISCORD_TOKEN)
