@@ -15,9 +15,8 @@ from aiohttp import web
 # ==========================================
 # [ 1. 核心參數與持久化內存 ]
 # ==========================================
-DISCORD_TOKEN = os.getenv('MTQ3MjI1MTU0MjE1NjYxMTc3Nw.GLbMif.0IhxkbWJa19VbLF7d2Tq84u85XowWw5brkslV8')
-GEMINI_API_KEY = os.getenv('AIzaSyBF9Ms8yMWAL3PwUDiwbBAaY3UVQ1BGX1o')
-
+DISCORD_TOKEN = 'MTQ3MjI1MTU0MjE1NjYxMTc3Nw.GLbMif.0IhxkbWJa19VbLF7d2Tq84u85XowWw5brkslV8'
+GEMINI_API_KEY = 'AIzaSyBF9Ms8yMWAL3PwUDiwbBAaY3UVQ1BGX1o'
 MY_GUILD_ID = 1382281014101151744 
 ANNOUNCE_CHANNEL_ID = 1406967598125547540
 KEYWORD_MONITOR_ID = 1365567879243628545
@@ -272,5 +271,6 @@ async def on_message(message):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
 
 
