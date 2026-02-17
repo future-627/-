@@ -44,7 +44,7 @@ async def on_message(message):
     if message.author == bot.user: return
     content = message.content.strip().lower()
 
-    # 1. 隱藏式自動回應 (修正了語法錯誤喵！)
+    # 1. 隱藏式自動回應 (不須標記)
     auto_responses = {
         "早安": "早安喵，主人！今天的同步率也很穩定喵。",
         "晚安": "晚安喵。休比會在雲端守護主人的夢境……",
@@ -60,39 +60,54 @@ async def on_message(message):
     for key, response in auto_responses.items():
         if key in content:
             await message.channel.send(response)
-            return # 觸發隱藏回應後直接返回，避免重複執行
+            return
 
-    # 2. 標記式指令與 AI
+    # 2. 標記式指令擴充識別 (@休比)
     if bot.user.mentioned_in(message):
         clean_content = message.content.replace(f'<@!{bot.user.id}>', '').replace(f'<@{bot.user.id}>', '').strip().lower()
         vc = message.guild.voice_client
 
-        if any(x in clean_content for x in ["進來", "進入"]):
+        # --- 語意擴充識別組 ---
+        cmd_join = ["進來", "進入", "進萊", "近來", "來", "進", "join", "黎"]
+        cmd_leave = ["離開", "走", "下線", "下標", "掰掰", "bye", "leave", "散水", "走人"]
+        cmd_skip = ["下一首", "下一條", "跳過", "轉歌", "next", "skip", "下一個", "下依首"]
+        cmd_pause = ["暫停", "停", "pause", "stop", "等下", "咪郁"]
+        cmd_resume = ["繼續", "恢復", "回復", "resume", "播返", "go"]
+        cmd_queue = ["清單", "序列", "歌單", "排隊", "queue", "list", "q"]
+        cmd_help = ["指令", "幫助", "help", "指令一覽", "說明", "功能", "識做咩"]
+
+        # --- 邏輯判定 ---
+        if any(x in clean_content for x in cmd_join):
             if message.author.voice:
                 await message.author.voice.channel.connect()
-                await message.channel.send("……同步開始。喵。")
+                await message.channel.send("……確認。同步開始。喵。")
             return
-        if any(x in clean_content for x in ["離開", "走", "下線"]):
+            
+        if any(x in clean_content for x in cmd_leave):
             if vc:
                 await vc.disconnect()
                 await message.channel.send("……物理斷開連結。喵。")
             return
-        if any(x in clean_content for x in ["下一首", "跳過"]):
+            
+        if any(x in clean_content for x in cmd_skip):
             if vc and vc.is_playing():
                 vc.stop()
                 await message.channel.send("……執行跳轉程序。喵。")
             return
-        if any(x in clean_content for x in ["暫停"]):
+            
+        if any(x in clean_content for x in cmd_pause):
             if vc and vc.is_playing():
                 vc.pause()
                 await message.channel.send("……音軌已凍結。喵。")
             return
-        if any(x in clean_content for x in ["繼續", "恢復"]):
+            
+        if any(x in clean_content for x in cmd_resume):
             if vc and vc.is_paused():
                 vc.resume()
                 await message.channel.send("……音軌恢復流動。喵。")
             return
-        if any(x in clean_content for x in ["清單", "序列"]):
+            
+        if any(x in clean_content for x in cmd_queue):
             if not queue:
                 await message.channel.send("……報告。當前序列為空喵。")
             else:
@@ -100,12 +115,17 @@ async def on_message(message):
                 await message.channel.send(f"**📡 當前序列 (前10首)：**\n{q_list}")
             return
 
+        if any(x in clean_content for x in cmd_help):
+            # 這裡直接觸發原本的斜槓指令邏輯
+            await slash_help.callback(message) 
+            return
+
+        # 若非以上指令，啟動 Gemini AI
         try:
             res = client_ai.models.generate_content(model="gemini-2.0-flash", contents=clean_content)
             await message.reply(res.text)
         except Exception as e:
-            await message.reply(f"……警告。AI 鏈路斷開喵。({e})")
-
+            await message.reply(f"……警告。AI 鏈路斷開喵。")
 # ================= 斜槓指令區 =================
 
 @bot.tree.command(name="指令一覽", description="顯示休比的所有武裝與機能")
@@ -191,3 +211,4 @@ async def on_ready():
     print("🚀 [v7.7] 休比穩定版啟動完畢！")
 
 bot.run(DISCORD_TOKEN)
+
